@@ -53,18 +53,24 @@
 /************************** Constant Definitions ****************************/
 /****************************************************************************/
 
+// Device ID
+
 #define BTN_GPIO_DEVICEID       XPAR_BTNS_5BIT_DEVICE_ID
 #define SW_GPIO_DEVICEID        XPAR_SW_16BIT_DEVICE_ID
 #define LED_GPIO_DEVICEID       XPAR_LEDS_16BIT_DEVICE_ID
 #define INTC_DEVICEID           XPAR_INTC_0_DEVICE_ID
 #define WDT_DEVICEID            XPAR_WDTTB_0_DEVICE_ID
 #define TMRCTR0_DEVICEID        XPAR_TMRCTR_0_DEVICE_ID
-#define TMRCTR1_DEVICEID        XPAR_TMRCTR_1_DEVICE_ID
 
-#define TMRCTR0_INTR_NUM        XPAR_INTC_0_TMRCTR_0_VEC_ID
-#define TMRCTR1_INTR_NUM        XPAR_INTC_0_TMRCTR_1_VEC_ID
+// Interrupt numbers
+
+#define TMRCTR0_INTR_NUM        XPAR_MICROBLAZE_0_AXI_INTC_AXI_TIMER_0_INTERRUPT_INTR
 #define BTN_GPIO_INTR_NUM       XPAR_MICROBLAZE_0_AXI_INTC_BTNS_5BIT_IP2INTC_IRPT_INTR
 #define WDT_INTR_NUM            XPAR_MICROBLAZE_0_AXI_INTC_AXI_TIMEBASE_WDT_0_WDT_INTERRUPT_INTR
+
+ // Miscellaneous
+
+ #define GPIO_CHANNEL_1         1
 
 /****************************************************************************/
 /***************** Macros (Inline Functions) Definitions ********************/
@@ -78,7 +84,7 @@
 /****************************************************************************/
 
 XGpio BTNInst, SWInst, LEDInst;
-XTmrCtr TMRCTR1Inst;
+XTmrCtr TMRCTR0Inst;
 XWdtTb WDTInst;
 
 /****************************************************************************/
@@ -113,6 +119,13 @@ void  button_handler(void);
 void  wdt_handler(void);
 XStatus init_peripherals(void);
 
+/****************************************************************************/
+/***************************** Global Variables *****************************/
+/****************************************************************************/
+
+bool                sys_run;                // flag for determining whether system is running
+bool                force_crash;            // flag for intentionally crashing the system
+unsigned int        button_state;           // global variable to hold button values
 
 /****************************************************************************/
 /************************** MAIN PROGRAM ************************************/
@@ -187,7 +200,7 @@ void* master_thread(void *arg) {
     // set the priority of all but the master thread to 1
     // master thread runs at priority 0 b/c it tickles the WDT
 
-    pthread_attr_init (&attr);              
+    pthread_attr_init(&attr);
     spar.sched_priority = 1;
     pthread_attr_setschedparam(&attr, &spar);
 
@@ -278,14 +291,13 @@ void* master_thread(void *arg) {
 
     xil_printf("MASTER: Interrupts have been enabled\r\n");
 
-    XWdtTb_Start(&WDTInst);
-    xil_printf("MASTER: Watchdog timer has been started\r\n");
+/*    XWdtTb_Start(&WDTInst);
+    xil_printf("MASTER: Watchdog timer has been started\r\n");*/
 
     // master thread main loop
 
-    while(1)
-    {
-        //***** INSERT YOUR MASTER THREAD CODE HERE ******//
+    while(1) {
+        sleep(1000);
     }
 
     return NULL;
@@ -295,9 +307,13 @@ void* master_thread(void *arg) {
 /************************** BUTTON THREAD ***********************************/
 /****************************************************************************/
 
-void* button_thread(void *arg)
-{
-    //***** INSERT YOUR BUTTON THREAD CODE HERE ******//
+void* button_thread(void *arg) {
+
+    while (1) {
+
+        button_state = XGpio_DiscreteRead(&BTNInst, GPIO_CHANNEL_1);
+        yield();
+    }
 
     return NULL;
 }
@@ -306,9 +322,15 @@ void* button_thread(void *arg)
 /************************* SWITCHES THREAD **********************************/
 /****************************************************************************/
 
-void* switches_thread(void *arg)
-{
-    //***** INSERT YOUR SWITCHES THREAD CODE HERE ******//
+void* switches_thread(void *arg) {
+
+    unsigned int sw = 0x00;
+
+    while (1) {
+
+        sw = XGpio_DiscreteRead(&SWInst, GPIO_CHANNEL_1);
+        yield();
+    }
 
     return NULL;
 }
@@ -317,11 +339,18 @@ void* switches_thread(void *arg)
 /*************************** LEDS THREAD ************************************/
 /****************************************************************************/
 
-void* leds_thread(void *arg)
-{
-    //***** INSERT YOUR LEDS THREAD CODE HERE ******//
+void* leds_thread(void *arg) {
+
+    unsigned int leds = 0x00;
+
+    while (1) {
+
+        XGpio_DiscreteWrite(&LEDInst, GPIO_CHANNEL_1, button_state); 
+        yield();
+    }
 
     return NULL;
+
 }
 
 
@@ -329,10 +358,44 @@ void* leds_thread(void *arg)
 /************************* INIT PERIPHERALS *********************************/
 /****************************************************************************/
 
-XStatus init_peripherals(void)
-{
+XStatus init_peripherals(void) {
 
-    //***** INSERT YOUR PERIPHERAL INITIALIZATION CODE HERE ******//
+    int status;             // status from Xilinx Lib calls
+
+    // initialize the button GPIO instance
+
+    status = XGpio_Initialize(&BTNInst, BTN_GPIO_DEVICEID);
+
+    if (status != XST_SUCCESS) {
+        xil_printf("ERROR: Failed to initialize button GPIO\r\n");
+        return XST_FAILURE;
+    }
+
+    XGpio_SetDataDirection(&BTNInst, GPIO_CHANNEL_1, 0x1F);
+
+    // initialize the switches GPIO instance
+
+    status = XGpio_Initialize(&SWInst, SW_GPIO_DEVICEID);
+
+    if (status != XST_SUCCESS) {
+        xil_printf("ERROR: Failed to initialize switches GPIO\r\n");
+        return XST_FAILURE;
+    }
+
+    XGpio_SetDataDirection(&SWInst, GPIO_CHANNEL_1, 0xFFFF);
+
+    // initialize the LEDs GPIO instance
+
+    status = XGpio_Initialize(&LEDInst, LED_GPIO_DEVICEID);
+
+    if (status != XST_SUCCESS) {
+        xil_printf("ERROR: Failed to initialize LEDs GPIO\r\n");
+        return XST_FAILURE;
+    }
+
+    XGpio_SetDataDirection(&LEDInst, GPIO_CHANNEL_1, 0x0000);
+
+    // successfully initialized... time to return
 
     return XST_SUCCESS;
 }
@@ -344,7 +407,7 @@ XStatus init_peripherals(void)
 void button_handler(void)
 {
     //***** INSERT YOUR BUTTON PRESS INTERRUPT HANDLER CODE HERE *****//
-
+    xil_printf("Button handler");
     acknowledge_interrupt(BTN_GPIO_INTR_NUM);
 }
 

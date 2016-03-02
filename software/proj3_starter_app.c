@@ -177,7 +177,6 @@ int main() {
     return 0;
 }
 
-
 /****************************************************************************/
 /************************** MASTER THREAD ***********************************/
 /****************************************************************************/
@@ -310,6 +309,7 @@ void* master_thread(void *arg) {
 
     while(1) {
 
+        sys_run = true;
         ticks = xget_clock_ticks();
         xil_printf("MASTER: %d ticks have elapsed\r\n", ticks);
         sleep(1000);
@@ -443,7 +443,19 @@ void button_handler(void) {
 
 void wdt_handler(void) {
 
-    xil_printf("WATCHDOG: Resetting the timer....\r\n");
-    XWdtTb_RestartWdt(&WDTInst);
+    if (force_crash) {
+         xil_printf("WATCHDOG: Forced crash on next timeout....\r\n");
+    }
+
+    else if (sys_run) {
+        xil_printf("WATCHDOG: Resetting the timer....\r\n");
+        XWdtTb_RestartWdt(&WDTInst);  
+    }
+
+    else {
+        xil_printf("WATCHDOG: System crash on next timeout...\r\n");
+    }
+
+    sys_run = false;
     acknowledge_interrupt(WDT_INTR_NUM);
 }

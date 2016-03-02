@@ -47,7 +47,7 @@
 #include "xwdttb.h"
 #include "xtmrctr.h"
 #include "xstatus.h"
-
+#include "xintc.h"
 
 /****************************************************************************/
 /************************** Constant Definitions ****************************/
@@ -61,6 +61,7 @@
 #define INTC_DEVICEID           XPAR_INTC_0_DEVICE_ID
 #define WDT_DEVICEID            XPAR_WDTTB_0_DEVICE_ID
 #define TMRCTR0_DEVICEID        XPAR_TMRCTR_0_DEVICE_ID
+#define INTC_DEVICEID           XPAR_INTC_0_DEVICE_ID
 
 // Interrupt numbers
 
@@ -71,6 +72,11 @@
  // Miscellaneous
 
  #define GPIO_CHANNEL_1         1
+ #define MSK_CLEAR_INTR_CH1     0x00000001
+ #define MSK_ENABLE_INTR_CH1    0x00000001
+ #define MSK_LED_16BIT_OUTPUT   0x0000
+ #define MSK_SW_16BIT_INPUT     0xFFFF
+ #define MSK_PBTNS_5BIT_INPUT   0x1F
 
 /****************************************************************************/
 /***************** Macros (Inline Functions) Definitions ********************/
@@ -83,9 +89,12 @@
 /************************** Variable Definitions ****************************/
 /****************************************************************************/
 
-XGpio BTNInst, SWInst, LEDInst;
-XTmrCtr TMRCTR0Inst;
-XWdtTb WDTInst;
+XGpio       BTNInst;
+XGpio       SWInst;
+XGpio       LEDInst;
+XTmrCtr     TMRCTR0Inst;
+XWdtTb      WDTInst;
+XIntc       IntrptCtlrInst;
 
 /****************************************************************************/
 /*************************** Typdefs & Structures ***************************/
@@ -183,6 +192,7 @@ void* master_thread(void *arg) {
     struct sched_param spar;
 
     int ret;
+    unsigned int ticks;
 
     xil_printf("----------------------------------------------------------------------------\r\n");
     xil_printf("ECE 544 Project 3 Starter Application \r\n");
@@ -263,7 +273,7 @@ void* master_thread(void *arg) {
         xil_printf ("MASTER: Button press semaphore has been initialized\n\r");
     }
 
-    // Register the interrupt handlers
+    // register the watchdog interrupt handler
 
     ret = register_int_handler(WDT_INTR_NUM, (void*) wdt_handler, NULL);
 
@@ -275,6 +285,8 @@ void* master_thread(void *arg) {
         xil_printf("MASTER: WDT interrupt handler created successfully\r\n");
     }
 
+    // register the button interrupt handler
+
     ret = register_int_handler(BTN_GPIO_INTR_NUM, (void*) button_handler, NULL);
 
     if (ret != XST_SUCCESS) {
@@ -284,19 +296,22 @@ void* master_thread(void *arg) {
         xil_printf("MASTER: Button interrupt handler created successfully\r\n");
     }
 
-    // Enable interrupts and start the WDT...we're off to the races
+    // enable interrupts and start the WDT...we're off to the races
 
     enable_interrupt(BTN_GPIO_INTR_NUM);
-    enable_interrupt(WDT_INTR_NUM);
+    // enable_interrupt(WDT_INTR_NUM);
 
     xil_printf("MASTER: Interrupts have been enabled\r\n");
 
-/*    XWdtTb_Start(&WDTInst);
-    xil_printf("MASTER: Watchdog timer has been started\r\n");*/
+    // XWdtTb_Start(&WDTInst);
+    // xil_printf("MASTER: Watchdog timer has been started\r\n");
 
     // master thread main loop
 
     while(1) {
+
+        ticks = xget_clock_ticks();
+        xil_printf("MASTER: %d ticks have elapsed\r\n", ticks);
         sleep(1000);
     }
 
@@ -311,7 +326,6 @@ void* button_thread(void *arg) {
 
     while (1) {
 
-        button_state = XGpio_DiscreteRead(&BTNInst, GPIO_CHANNEL_1);
         yield();
     }
 
@@ -353,7 +367,6 @@ void* leds_thread(void *arg) {
 
 }
 
-
 /****************************************************************************/
 /************************* INIT PERIPHERALS *********************************/
 /****************************************************************************/
@@ -367,33 +380,45 @@ XStatus init_peripherals(void) {
     status = XGpio_Initialize(&BTNInst, BTN_GPIO_DEVICEID);
 
     if (status != XST_SUCCESS) {
-        xil_printf("ERROR: Failed to initialize button GPIO\r\n");
+        xil_printf("ERROR: Failed to initialize buttons!\r\n");
         return XST_FAILURE;
     }
 
-    XGpio_SetDataDirection(&BTNInst, GPIO_CHANNEL_1, 0x1F);
+    XGpio_InterruptGlobalEnable(&BTNInst);
+    XGpio_InterruptEnable(&BTNInst, MSK_ENABLE_INTR_CH1);
+    XGpio_SetDataDirection(&BTNInst, GPIO_CHANNEL_1, MSK_PBTNS_5BIT_INPUT);
 
     // initialize the switches GPIO instance
 
     status = XGpio_Initialize(&SWInst, SW_GPIO_DEVICEID);
 
     if (status != XST_SUCCESS) {
-        xil_printf("ERROR: Failed to initialize switches GPIO\r\n");
+        xil_printf("ERROR: Failed to initialize switches!\r\n");
         return XST_FAILURE;
     }
 
-    XGpio_SetDataDirection(&SWInst, GPIO_CHANNEL_1, 0xFFFF);
+    XGpio_SetDataDirection(&SWInst, GPIO_CHANNEL_1, MSK_SW_16BIT_INPUT);
 
     // initialize the LEDs GPIO instance
 
     status = XGpio_Initialize(&LEDInst, LED_GPIO_DEVICEID);
 
     if (status != XST_SUCCESS) {
-        xil_printf("ERROR: Failed to initialize LEDs GPIO\r\n");
+        xil_printf("ERROR: Failed to initialize LEDs!\r\n");
         return XST_FAILURE;
     }
 
-    XGpio_SetDataDirection(&LEDInst, GPIO_CHANNEL_1, 0x0000);
+    XGpio_SetDataDirection(&LEDInst, GPIO_CHANNEL_1, MSK_LED_16BIT_OUTPUT);
+
+    // // initialize the watchdog timer and timebase driver 
+    // // so that it is ready to use
+
+    // status = XWdtTb_Initialize(&WDTInst,WDT_DEVICEID);
+
+    // if (status != XST_SUCCESS) {
+    //     xil_printf("ERROR: Failed to initialize Watchdog!\r\n");
+    //     return XST_FAILURE;
+    // }
 
     // successfully initialized... time to return
 
@@ -404,10 +429,11 @@ XStatus init_peripherals(void) {
 /************************** BUTTON HANDLER **********************************/
 /****************************************************************************/
 
-void button_handler(void)
-{
-    //***** INSERT YOUR BUTTON PRESS INTERRUPT HANDLER CODE HERE *****//
-    xil_printf("Button handler");
+void button_handler(void) {
+
+    button_state = XGpio_DiscreteRead(&BTNInst, GPIO_CHANNEL_1);
+    xil_printf("BTN HANDLER: button_state = %d\r\n", button_state);
+    XGpio_InterruptClear(&BTNInst, MSK_CLEAR_INTR_CH1);
     acknowledge_interrupt(BTN_GPIO_INTR_NUM);
 }
 
@@ -415,9 +441,10 @@ void button_handler(void)
 /*************************** WDT HANDLER ************************************/
 /****************************************************************************/
 
-void wdt_handler(void)
-{
-    //***** INSERT YOUR WATCHDOG TIMER INTERRUPT HANDLER CODE HERE *****//
-    xil_printf("Watchdog launches successfully");
+void wdt_handler(void) {
+
+    xil_printf("WATCHDOG: Resetting the timer....");
+    XWdtTb_RestartWdt(&WDTInst);
+
     acknowledge_interrupt(WDT_INTR_NUM);
 }

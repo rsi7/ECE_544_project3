@@ -165,6 +165,15 @@ int main() {
     }
 
     // check if WDT expired and caused the reset - if so, don't start
+    
+    if (XWdtTb_IsWdtExpired(&WDTInst)) {
+        xil_printf("WATCHDOG RESET: Previous crash caused by WDT. Please power cycle system to reset.");
+
+        while (1) {
+            // infinite loop... waiting for user to power-cycle system
+            // Watchdog Reset Status bit will stay set until IP Core is reset
+        }
+    }
 
     // Initialize xilkernel
     xilkernel_init();
@@ -330,14 +339,24 @@ void* master_thread(void *arg) {
 
     while(1) {
 
+        // make sure system running flag is set
+        // otherwise watchdog handler will reset the system
+
         sys_run = true;
+
+        // get & print the kernel time
+
         ticks = xget_clock_ticks();
         xil_printf("MASTER: %d ticks have elapsed\r\n", ticks);
         
+        // check & print the message queue length
+
         msg_id = msgget(led_msg_key, IPC_CREAT);
         msgctl(msg_id, IPC_STAT, &led_msgstats);
         xil_printf("MASTER: %d messages in the queue\r\n", led_msgstats.msg_qnum);
         
+        // repeat every second
+
         sleep(1000);
     }
 
@@ -360,13 +379,25 @@ void* button_thread(void *arg) {
 
     while (1) {
 
+        // wait for sempaphore to get unlocked by button handler
+        // then immediately lock it
+
         sem_wait(&btn_press_sema);
+
+        // read the buttons
 
         btn = XGpio_DiscreteRead(&BTNInst, GPIO_CHANNEL_1);
 
+        // move the buttons over to led[13:9]
+
         btn_msg.value = btn << 9;
+
+        // send the button values to the message queue
+
         msg_id = msgget(led_msg_key, IPC_CREAT);
         ret = msgsnd(msg_id, &btn_msg, sizeof(_msg), 0);
+
+        // error handling if sending the message fails
 
         if (ret == -1) {
 
@@ -377,6 +408,8 @@ void* button_thread(void *arg) {
                 default : xil_printf("BUTTON THREAD: Error (%d) occured while sending message\r\n", errno); break;
             }
         }
+
+        // yield remaining time to next thread
 
         yield();
     }
@@ -402,13 +435,19 @@ void* switches_thread(void *arg) {
 
         sw = XGpio_DiscreteRead(&SWInst, GPIO_CHANNEL_1);
 
+        // check if sw[15] is high for user-provoked crash
+
         if (sw & MSK_SW_FORCE_CRASH) {
             force_crash = true;
         }
         
+        // send the switch values to the message queue
+
         sw_msg.value = (sw & MSK_SW_LOWER_HALF);
         msg_id = msgget(led_msg_key, IPC_CREAT);
         ret = msgsnd(msg_id, &sw_msg, sizeof(_msg), 0);
+
+        // error handling if sending the message fails
 
         if (ret == -1) {
 
@@ -419,6 +458,8 @@ void* switches_thread(void *arg) {
                 default : xil_printf("SWITCHES THREAD: Error (%d) occured while sending message\r\n", errno); break;
             }
         }
+
+        // yield remaining time to the next thread
 
         yield();
     }
@@ -440,9 +481,12 @@ void* leds_thread(void *arg) {
 
     while (1) {
 
-        
+        // check the message queue for new messages
+
         msg_id = msgget(led_msg_key, IPC_CREAT);
         ret = msgrcv(msg_id, &localbuff, sizeof(_msg), 0, 0);
+
+        // error handling in case reading the message fails
 
         if (ret == -1) {
 
@@ -454,7 +498,7 @@ void* leds_thread(void *arg) {
             }
         }
 
-        // depending on message, need to switch toggle certain LEDs
+        // depending on message source, need to toggle certain LEDs
 
         if (localbuff.source == SRC_SWITCHES) {
             leds &= MSK_SW_REMOVE;
@@ -470,8 +514,11 @@ void* leds_thread(void *arg) {
             xil_printf("LEDS THREAD: Couldn't determine message source!\r\n");
         }
 
+        // update the LEDs on the board
+
         XGpio_DiscreteWrite(&LEDInst, GPIO_CHANNEL_1, leds); 
 
+        // yield remaining time to next thread
 
         yield();
     }
@@ -497,8 +544,11 @@ XStatus init_peripherals(void) {
         return XST_FAILURE;
     }
 
+    // make sure button interrupts are enabled
+    
     XGpio_InterruptGlobalEnable(&BTNInst);
     XGpio_InterruptEnable(&BTNInst, MSK_ENABLE_INTR_CH1);
+
     XGpio_SetDataDirection(&BTNInst, GPIO_CHANNEL_1, MSK_PBTNS_5BIT_INPUT);
 
     // initialize the switches GPIO instance
@@ -523,8 +573,7 @@ XStatus init_peripherals(void) {
 
     XGpio_SetDataDirection(&LEDInst, GPIO_CHANNEL_1, MSK_LED_16BIT_OUTPUT);
 
-    // initialize the watchdog timer and timebase driver 
-    // so that it is ready to use
+    // initialize the watchdog timer 
 
     status = XWdtTb_Initialize(&WDTInst,WDT_DEVICEID);
 
@@ -544,10 +593,15 @@ XStatus init_peripherals(void) {
 
 void button_handler(void) {
 
+    // unlock the semaphore for button thread
+
     sem_post(&btn_press_sema);
 
+    // update the global variable
+
     button_state = XGpio_DiscreteRead(&BTNInst, GPIO_CHANNEL_1);
-    xil_printf("BTN HANDLER: button_state = %d\r\n", button_state);
+
+    // acknowledge & clear interrupt flag
 
     XGpio_InterruptClear(&BTNInst, MSK_CLEAR_INTR_CH1);
     acknowledge_interrupt(BTN_GPIO_INTR_NUM);
@@ -559,18 +613,26 @@ void button_handler(void) {
 
 void wdt_handler(void) {
 
+    // check for crash flag and warn if pending
+
     if (force_crash) {
-         xil_printf("WATCHDOG: Forced crash on next timeout....\r\n");
+         xil_printf("WATCHDOG: Forced crash on next timeout...\r\n");
     }
 
+    // check for system running flag and restart the WDT
+
     else if (sys_run) {
-        xil_printf("WATCHDOG: Resetting the timer....\r\n");
+        xil_printf("WATCHDOG: Kicking the dog...\r\n");
         XWdtTb_RestartWdt(&WDTInst);  
     }
+
+    // otherwise, system timed out and natural restart is needed
 
     else {
         xil_printf("WATCHDOG: System crash on next timeout...\r\n");
     }
+
+    // make the master thread reset this flag
 
     sys_run = false;
     acknowledge_interrupt(WDT_INTR_NUM);

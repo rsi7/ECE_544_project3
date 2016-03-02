@@ -71,12 +71,18 @@
 
  // Miscellaneous
 
- #define GPIO_CHANNEL_1         1
- #define MSK_CLEAR_INTR_CH1     0x00000001
- #define MSK_ENABLE_INTR_CH1    0x00000001
- #define MSK_LED_16BIT_OUTPUT   0x0000
- #define MSK_SW_16BIT_INPUT     0xFFFF
- #define MSK_PBTNS_5BIT_INPUT   0x1F
+#define GPIO_CHANNEL_1          1
+#define MSK_CLEAR_INTR_CH1      0x00000001
+#define MSK_ENABLE_INTR_CH1     0x00000001
+#define MSK_LED_16BIT_OUTPUT    0x0000
+#define MSK_SW_16BIT_INPUT      0xFFFF
+#define MSK_PBTNS_5BIT_INPUT    0x1F
+#define MSK_SW_FORCE_CRASH      0x00008000
+#define MSK_SW_LOWER_HALF       0x000080FF
+#define SRC_SWITCHES            0x00000001
+#define SRC_BUTTONS             0x00000002
+#define MSK_SW_REMOVE           0x00003E00
+#define MSK_PBTNS_REMOVE        0x0000C1FF
 
 /****************************************************************************/
 /***************** Macros (Inline Functions) Definitions ********************/
@@ -103,18 +109,16 @@ XIntc       IntrptCtlrInst;
 // LED message structure
 
 typedef struct {
-    int msg_src;
-    int msg_value;
-} t_LED_message, *t_LED_messageptr;
+    unsigned int source;
+    unsigned int value;
+} _msg;
 
-const int led_msg_key = 1;      // message key for LED message queue
-struct msqid_ds led_msgstats;   // statistics from message queue
+const   unsigned int    led_msg_key = 1;        // message key for LED message queue
+struct  msqid_ds        led_msgstats;           // statistics from message queue
 
 // Synchronization variables
 
 sem_t btn_press_sema;           // semaphore between clock tick ISR and the clock main thread
-volatile u32 btn_state;         // button state - shared between button handler and button thread
-
 
 /****************************************************************************/
 /************************** Function Prototypes *****************************/
@@ -132,9 +136,9 @@ XStatus init_peripherals(void);
 /***************************** Global Variables *****************************/
 /****************************************************************************/
 
-bool                sys_run;                // flag for determining whether system is running
-bool                force_crash;            // flag for intentionally crashing the system
-unsigned int        button_state;           // global variable to hold button values
+static bool                 sys_run;                // flag for determining whether system is running
+static bool                 force_crash;            // flag for intentionally crashing the system
+volatile unsigned int       button_state;           // global variable to hold button values
 
 /****************************************************************************/
 /************************** MAIN PROGRAM ************************************/
@@ -192,6 +196,7 @@ void* master_thread(void *arg) {
 
     int ret;
     unsigned int ticks;
+    int msg_id;
 
     xil_printf("----------------------------------------------------------------------------\r\n");
     xil_printf("ECE 544 Project 3 Starter Application \r\n");
@@ -202,7 +207,7 @@ void* master_thread(void *arg) {
                "capabilities offered in the Xilkernel\r\n\r\n"
                "To demonstrate, press any of the buttons and/or flip switches on the board.\r\n"
                "The current state of the buttons and switches should be displayed on the LEDs\r\n");
-    xil_printf("----------------------------------------------------------------------------\r\n\r\n\r\n");;
+    xil_printf("----------------------------------------------------------------------------\r\n\r\n\r\n");
 
     xil_printf("MASTER: Master Thread Starting\r\n");
 
@@ -215,7 +220,7 @@ void* master_thread(void *arg) {
 
     // create the button thread
 
-    ret = pthread_create (&button, &attr, (void*) button_thread, NULL);
+    ret = pthread_create(&button, &attr, (void*) button_thread, NULL);
 
     if (ret != 0) {
 
@@ -260,16 +265,31 @@ void* master_thread(void *arg) {
 
     // initialize the button press semaphore
 
-    ret = sem_init (&btn_press_sema, 0, 0);
+    ret = sem_init(&btn_press_sema, 0, 0);
 
     if (ret != 0) {
+
         xil_printf("ERROR (%d) IN MASTER THREAD: could not initialize %s\r\n", errno, "button press semaphore");
         xil_printf("FATAL ERROR: Master Thread Terminating\r\n");
         return (void*) -3;
     }
 
     else {
-        xil_printf ("MASTER: Button press semaphore has been initialized\n\r");
+        xil_printf("MASTER: Button press semaphore has been initialized\n\r");
+    }
+
+    // initialize the message queue
+
+    ret = msgget(led_msg_key, IPC_CREAT);
+
+    if (ret == -1) {
+
+        xil_printf("ERROR (%d): Could not create message queue.\r\n", errno);
+        return (void*) -3;
+    }
+
+    else {
+        xil_printf("MASTER: Successfully created LED message queue\r\n");
     }
 
     // register the watchdog interrupt handler
@@ -291,6 +311,7 @@ void* master_thread(void *arg) {
     if (ret != XST_SUCCESS) {
         return (void*) -4;
     }
+
     else {
         xil_printf("MASTER: Button interrupt handler created successfully\r\n");
     }
@@ -312,6 +333,11 @@ void* master_thread(void *arg) {
         sys_run = true;
         ticks = xget_clock_ticks();
         xil_printf("MASTER: %d ticks have elapsed\r\n", ticks);
+        
+        msg_id = msgget(led_msg_key, IPC_CREAT);
+        msgctl(msg_id, IPC_STAT, &led_msgstats);
+        xil_printf("MASTER: %d messages in the queue\r\n", led_msgstats.msg_qnum);
+        
         sleep(1000);
     }
 
@@ -324,7 +350,33 @@ void* master_thread(void *arg) {
 
 void* button_thread(void *arg) {
 
+    unsigned int    btn     = 0x00;
+    int             ret     = 0x00;
+    int             msg_id  = 0x00;
+
+    _msg            btn_msg;
+
+    btn_msg.source = SRC_BUTTONS;
+
     while (1) {
+
+        sem_wait(&btn_press_sema);
+
+        btn = XGpio_DiscreteRead(&BTNInst, GPIO_CHANNEL_1);
+
+        btn_msg.value = btn << 9;
+        msg_id = msgget(led_msg_key, IPC_CREAT);
+        ret = msgsnd(msg_id, &btn_msg, sizeof(_msg), 0);
+
+        if (ret == -1) {
+
+            switch (errno) {
+
+                case (EINVAL) : xil_printf("BUTTON THREAD: Couldn't find message queue.\r\n"); break;
+                case (ENOSPC) : xil_printf("BUTTON THREAD: Couldn't allocate space on queue.\r\n"); break;
+                default : xil_printf("BUTTON THREAD: Error (%d) occured while sending message\r\n", errno); break;
+            }
+        }
 
         yield();
     }
@@ -338,11 +390,36 @@ void* button_thread(void *arg) {
 
 void* switches_thread(void *arg) {
 
-    unsigned int sw = 0x00;
+    unsigned int    sw      = 0x00;
+    int             ret     = 0x00;
+    int             msg_id  = 0x00;
+
+    _msg            sw_msg;
+
+    sw_msg.source = SRC_SWITCHES;
 
     while (1) {
 
         sw = XGpio_DiscreteRead(&SWInst, GPIO_CHANNEL_1);
+
+        if (sw & MSK_SW_FORCE_CRASH) {
+            force_crash = true;
+        }
+        
+        sw_msg.value = (sw & MSK_SW_LOWER_HALF);
+        msg_id = msgget(led_msg_key, IPC_CREAT);
+        ret = msgsnd(msg_id, &sw_msg, sizeof(_msg), 0);
+
+        if (ret == -1) {
+
+            switch (errno) {
+
+                case (EINVAL) : xil_printf("SWITCHES THREAD: Couldn't find message queue.\r\n"); break;
+                case (ENOSPC) : xil_printf("SWITCHES THREAD: Couldn't allocate space on queue.\r\n"); break;
+                default : xil_printf("SWITCHES THREAD: Error (%d) occured while sending message\r\n", errno); break;
+            }
+        }
+
         yield();
     }
 
@@ -355,11 +432,47 @@ void* switches_thread(void *arg) {
 
 void* leds_thread(void *arg) {
 
-    unsigned int leds = 0x00;
+    unsigned int    leds    = 0x00;
+    int             ret     = 0x00;
+    int             msg_id  = 0x00;
+
+    _msg            localbuff;
 
     while (1) {
 
-        XGpio_DiscreteWrite(&LEDInst, GPIO_CHANNEL_1, button_state); 
+        
+        msg_id = msgget(led_msg_key, IPC_CREAT);
+        ret = msgrcv(msg_id, &localbuff, sizeof(_msg), 0, 0);
+
+        if (ret == -1) {
+
+            switch (errno) {
+
+                case (EINVAL) : xil_printf("LEDS THREAD: Couldn't find message queue.\r\n"); break;
+                case (ENOMSG) : xil_printf("LEDS THREAD: Error with the message size.\r\n"); break;
+                default : xil_printf("LEDS THREAD: Error (%d) occured while sending message\r\n", errno); break;
+            }
+        }
+
+        // depending on message, need to switch toggle certain LEDs
+
+        if (localbuff.source == SRC_SWITCHES) {
+            leds &= MSK_SW_REMOVE;
+            leds |= localbuff.value;
+        }
+
+        else if (localbuff.source == SRC_BUTTONS) {
+            leds &= MSK_PBTNS_REMOVE;
+            leds |= localbuff.value;
+        }
+
+        else {
+            xil_printf("LEDS THREAD: Couldn't determine message source!\r\n");
+        }
+
+        XGpio_DiscreteWrite(&LEDInst, GPIO_CHANNEL_1, leds); 
+
+
         yield();
     }
 
@@ -431,8 +544,11 @@ XStatus init_peripherals(void) {
 
 void button_handler(void) {
 
+    sem_post(&btn_press_sema);
+
     button_state = XGpio_DiscreteRead(&BTNInst, GPIO_CHANNEL_1);
     xil_printf("BTN HANDLER: button_state = %d\r\n", button_state);
+
     XGpio_InterruptClear(&BTNInst, MSK_CLEAR_INTR_CH1);
     acknowledge_interrupt(BTN_GPIO_INTR_NUM);
 }

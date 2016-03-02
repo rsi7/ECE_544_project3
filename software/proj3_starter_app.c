@@ -299,12 +299,12 @@ void* master_thread(void *arg) {
     // enable interrupts and start the WDT...we're off to the races
 
     enable_interrupt(BTN_GPIO_INTR_NUM);
-    // enable_interrupt(WDT_INTR_NUM);
+    enable_interrupt(WDT_INTR_NUM);
 
     xil_printf("MASTER: Interrupts have been enabled\r\n");
 
-    // XWdtTb_Start(&WDTInst);
-    // xil_printf("MASTER: Watchdog timer has been started\r\n");
+    XWdtTb_Start(&WDTInst);
+    xil_printf("MASTER: Watchdog timer has been started\r\n");
 
     // master thread main loop
 
@@ -410,15 +410,15 @@ XStatus init_peripherals(void) {
 
     XGpio_SetDataDirection(&LEDInst, GPIO_CHANNEL_1, MSK_LED_16BIT_OUTPUT);
 
-    // // initialize the watchdog timer and timebase driver 
-    // // so that it is ready to use
+    // initialize the watchdog timer and timebase driver 
+    // so that it is ready to use
 
-    // status = XWdtTb_Initialize(&WDTInst,WDT_DEVICEID);
+    status = XWdtTb_Initialize(&WDTInst,WDT_DEVICEID);
 
-    // if (status != XST_SUCCESS) {
-    //     xil_printf("ERROR: Failed to initialize Watchdog!\r\n");
-    //     return XST_FAILURE;
-    // }
+    if (status != XST_SUCCESS) {
+        xil_printf("ERROR: Failed to initialize Watchdog!\r\n");
+        return XST_FAILURE;
+    }
 
     // successfully initialized... time to return
 
@@ -443,8 +443,7 @@ void button_handler(void) {
 
 void wdt_handler(void) {
 
-    xil_printf("WATCHDOG: Resetting the timer....");
+    xil_printf("WATCHDOG: Resetting the timer....\r\n");
     XWdtTb_RestartWdt(&WDTInst);
-
     acknowledge_interrupt(WDT_INTR_NUM);
 }
